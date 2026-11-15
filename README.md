@@ -19,6 +19,12 @@
 
 Потрібні Python 3.10+ та Pygame 2.6.1.
 
+**Windows:** відкрийте `run.bat` подвійним клацанням. Він створить `.venv`,
+встановить Pygame й запустить гру. Для першого запуску потрібен інтернет.
+Рекомендована версія Python — 3.12.
+
+Ручне встановлення:
+
 ```bash
 python -m venv .venv
 ```
@@ -90,6 +96,7 @@ Dungeon-Escape/
 │   ├── slides.md
 │   └── images/
 ├── requirements.txt
+├── run.bat
 └── README.md
 ```
 
