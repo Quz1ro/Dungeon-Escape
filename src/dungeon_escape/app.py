@@ -9,6 +9,7 @@ import pygame
 
 from .campaign import SOLO_STAGES, COOP_STAGES, Session
 from .model import State
+from .records import format_time, clean_scores
 
 BG = (15, 20, 34)
 PANEL = (29, 39, 56)
@@ -45,8 +46,22 @@ class Application:
         self.buttons = []
         self.progress_path = Path(progress_path) if progress_path is not None else Path(__file__).resolve().parents[2] / '.cache/dungeon_escape/progress.json'
         self.completed = {'solo': [], 'coop': []}
+        self.scores = clean_scores({})
+        self.profile = 'Гравець'
+        self.editing_name = False
+        self.notice = ''
+        self.win_recorded = False
+        self.legacy_progress = None
         try:
             saved = json.loads(self.progress_path.read_text(encoding='utf-8'))
+            if saved.get('campaign_version') != 2:
+                self.legacy_progress = saved
+                saved = {'profile': saved.get('profile', 'Гравець')}
+            else:
+                self.legacy_progress = saved.get('legacy_progress')
+            self.scores = clean_scores(saved.get('scores', {}))
+            name = saved.get('profile', 'Гравець')
+            self.profile = name[:20] if isinstance(name, str) and name.strip() else 'Гравець'
             for key in self.completed:
                 values = saved.get(key, [])
                 if isinstance(values, list):
@@ -84,12 +99,21 @@ class Application:
         self.text(title, rect.center, GOLD if selected else TEXT, center=True)
         self.buttons.append((rect, action))
 
-    def load_level(self, index):
+    def is_unlocked(self, index):
+        return 0 <= index < 9 and all(n in self.completed[self.mode] for n in range(1, index + 1))
+
+    def load_level(self, index, *, preview=False):
+        if not preview and not self.is_unlocked(index):
+            self.notice = 'Спочатку пройдіть попередні рівні.'
+            return False
+        self.win_recorded = False
+        self.notice = ''
         self.selected = index
         self.game = Session(self.stages[index])
         self.paused = False
         self.cooldowns = [0.18, 0.18]
         self.page = 'play'
+        return True
 
     def levels(self, mode=None):
         if mode is not None:
@@ -99,10 +123,28 @@ class Application:
         self.page = 'levels'
 
     def action(self, action):
+        if self.editing_name and action != 'name':
+            self.profile = self.profile.strip() or self.original_name
+            self.editing_name = False
+            pygame.key.stop_text_input()
+            self.save_progress()
         if action == 'quit':
             self.game.state = State.EXIT
         elif action in ('solo', 'coop'):
             self.levels(action)
+        elif action == 'top':
+            self.page = 'top'
+        elif action == 'rank_prev':
+            self.selected = (self.selected - 1) % 9
+        elif action == 'rank_next':
+            self.selected = (self.selected + 1) % 9
+        elif action == 'rank_mode':
+            self.mode = 'coop' if self.mode == 'solo' else 'solo'
+        elif action == 'name':
+            self.original_name = self.profile
+            self.profile = ''
+            self.editing_name = True
+            pygame.key.start_text_input()
         elif action == 'home':
             self.page = 'home'
         elif action == 'levels':
@@ -112,6 +154,9 @@ class Application:
         elif action == 'resume':
             self.paused = False
         elif action == 'next':
+            self.record_win()
+            if self.game.state is not State.WON:
+                return
             if self.selected < 8:
                 self.load_level(self.selected + 1)
             else:
@@ -120,17 +165,28 @@ class Application:
             self.load_level(action)
         self.buttons = []
 
+    def save_progress(self):
+        try:
+            self.progress_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.progress_path.with_suffix('.tmp')
+            temp.write_text(json.dumps({**self.completed, 'scores': self.scores, 'profile': self.profile, 'campaign_version': 2, 'legacy_progress': self.legacy_progress}, ensure_ascii=False), encoding='utf-8')
+            temp.replace(self.progress_path)
+        except OSError:
+            self.game.message = 'Не вдалося зберегти результат на диску.'
+
     def record_win(self):
+        if self.game.state is not State.WON or self.win_recorded:
+            return
+        self.win_recorded = True
         number = self.selected + 1
-        if self.game.state is State.WON and number not in self.completed[self.mode]:
+        if number not in self.completed[self.mode]:
             self.completed[self.mode].append(number)
-            try:
-                self.progress_path.parent.mkdir(parents=True, exist_ok=True)
-                temp = self.progress_path.with_suffix('.tmp')
-                temp.write_text(json.dumps(self.completed), encoding='utf-8')
-                temp.replace(self.progress_path)
-            except OSError:
-                self.game.message = 'Рівень пройдено, але прогрес не вдалося зберегти.'
+        entries = self.scores[self.mode].setdefault(str(number), [])
+        entries.append({'name': self.profile.strip() or 'Гравець',
+                        'seconds': round(self.game.elapsed, 3), 'moves': self.game.moves})
+        entries.sort(key=lambda entry: (entry['seconds'], entry['moves']))
+        del entries[10:]
+        self.save_progress()
 
     def input_move(self, key):
         if self.mode == 'coop':
@@ -154,22 +210,37 @@ class Application:
                 if rect.collidepoint(event.pos):
                     self.action(action)
                     break
+        elif event.type == pygame.TEXTINPUT and self.editing_name:
+            self.profile = (self.profile + ''.join(c for c in event.text if c.isprintable()))[:20]
         elif event.type == pygame.KEYDOWN:
             key = event.key
+            if self.editing_name:
+                if key in (pygame.K_RETURN, pygame.K_ESCAPE):
+                    self.editing_name = False
+                    self.profile = self.original_name if key == pygame.K_ESCAPE else self.profile.strip() or 'Гравець'
+                    pygame.key.stop_text_input()
+                    self.save_progress()
+                elif key == pygame.K_BACKSPACE:
+                    self.profile = self.profile[:-1]
+                return
             if key == pygame.K_ESCAPE:
-                self.action('home' if self.page == 'levels' else 'levels' if self.page == 'play' else 'quit')
+                self.action('levels' if self.page == 'top' else 'home' if self.page == 'levels' else 'levels' if self.page == 'play' else 'quit')
             elif self.page == 'home':
                 if key in (pygame.K_DOWN, pygame.K_s, pygame.K_UP, pygame.K_w):
-                    self.home_selected = (self.home_selected + (1 if key in (pygame.K_DOWN, pygame.K_s) else -1)) % 3
+                    self.home_selected = (self.home_selected + (1 if key in (pygame.K_DOWN, pygame.K_s) else -1)) % 4
                 elif key == pygame.K_RETURN:
-                    self.action(('solo', 'coop', 'quit')[self.home_selected])
-            elif self.page == 'levels':
+                    self.action(('solo', 'coop', 'top', 'quit')[self.home_selected])
+            elif self.page in ('levels', 'top'):
                 shifts = {pygame.K_LEFT: -1, pygame.K_a: -1, pygame.K_RIGHT: 1, pygame.K_d: 1,
                           pygame.K_UP: -3, pygame.K_w: -3, pygame.K_DOWN: 3, pygame.K_s: 3}
                 if key in shifts:
                     self.selected = (self.selected + shifts[key]) % 9
-                elif key == pygame.K_RETURN:
+                elif key == pygame.K_RETURN and self.page == 'levels':
                     self.load_level(self.selected)
+                elif key == pygame.K_t:
+                    self.page = 'levels' if self.page == 'top' else 'top'
+                elif key == pygame.K_TAB and self.page == 'top':
+                    self.mode = 'coop' if self.mode == 'solo' else 'solo'
             elif key == pygame.K_m:
                 self.levels()
             elif key == pygame.K_r:
@@ -204,10 +275,13 @@ class Application:
         self.text('DUNGEON ESCAPE', (cx, 157), GOLD, self.title_font, True)
         if self.page == 'home':
             self.text('Знайдіть ключі та виберіться з підземелля', (cx, 206), MUTED, center=True)
-            self.button((cx - 200, 285, 400, 72), 'Рівні · один гравець', 'solo', self.home_selected == 0)
-            self.button((cx - 200, 383, 400, 72), 'Гра на двох', 'coop', self.home_selected == 1)
-            self.text('9 рівнів у кожному режимі', (cx, 506), MUTED, center=True)
-            self.text('Клавіатура або миша · Enter — вибрати', (cx, 546), MUTED, center=True)
+            self.button((cx - 200, 270, 400, 64), 'Рівні · один гравець', 'solo', self.home_selected == 0)
+            self.button((cx - 200, 354, 400, 64), 'Гра на двох', 'coop', self.home_selected == 1)
+            self.button((cx - 200, 438, 400, 64), 'Топ рівнів', 'top', self.home_selected == 2)
+            self.button((cx - 180, 544, 360, 44), 'Ім’я: ' + self.profile + ('_' if self.editing_name else ''), 'name')
+            self.text('Клацніть ім’я, Backspace — стерти, Enter — зберегти', (cx, 612), MUTED, center=True)
+        elif self.page == 'top':
+            self.draw_top()
         else:
             title = 'ГРА НА ДВОХ' if self.mode == 'coop' else 'ОДИН ГРАВЕЦЬ'
             self.text(title, (cx, 204), COLORS[self.mode == 'coop'], center=True)
@@ -216,14 +290,44 @@ class Application:
             for index in range(9):
                 rect = pygame.Rect(left + (index % 3) * (size + gap), 246 + (index // 3) * (size + gap), size, size)
                 selected = self.selected == index
+                unlocked = self.is_unlocked(index)
                 self.button(rect, '', index, selected)
-                self.text(str(index + 1), (rect.centerx, rect.y + 39), GOLD if selected else TEXT, self.number_font, True)
-                if index + 1 in self.completed[self.mode]:
+                if not unlocked:
+                    pygame.draw.rect(self.screen, BG, rect.inflate(-6, -6), border_radius=10)
+                self.text(str(index + 1), (rect.centerx, rect.y + 39), GOLD if selected and unlocked else TEXT if unlocked else MUTED, self.number_font, True)
+                if not unlocked:
+                    self.text('ЗАКРИТО', (rect.centerx, rect.bottom - 19), MUTED, center=True)
+                elif index + 1 in self.completed[self.mode]:
                     self.text('ПРОЙДЕНО', (rect.centerx, rect.bottom - 19), GREEN, center=True)
             stage = self.stages[self.selected]
-            self.text(f'Рівень {stage.number} · шлях {stage.distance} кроків · дверей {len(stage.doors) // len(stage.starts)}', (cx, 625), MUTED, center=True)
+            self.text(f'Рівень {stage.number} · шлях {stage.distance} кроків · дверей {len(stage.doors)}', (cx, 625), MUTED, center=True)
+            self.text(self.notice or 'T — топ вибраного рівня', (cx, 662), MUTED, center=True)
             self.button((32, height - 72, 150, 44), 'Назад', 'home')
-        self.button((cx - 110, height - 72, 220, 44), 'Вихід', 'quit', self.page == 'home' and self.home_selected == 2)
+            self.button((width - 220, height - 72, 188, 44), 'Топ рівня', 'top')
+        self.button((cx - 110, height - 72, 220, 44), 'Вихід', 'quit', self.page == 'home' and self.home_selected == 3)
+
+    def draw_top(self):
+        width, height = self.screen.get_size()
+        cx = width // 2
+        mode = 'Гра на двох' if self.mode == 'coop' else 'Один гравець'
+        self.text(f'ЛОКАЛЬНИЙ ТОП · {mode}', (cx, 211), COLORS[self.mode == 'coop'], center=True)
+        self.text(f'Рівень {self.selected + 1}', (cx, 254), GOLD, self.title_font, True)
+        entries = self.scores[self.mode].get(str(self.selected + 1), [])
+        self.button((cx - 275, 235, 62, 42), '<', 'rank_prev')
+        self.button((cx + 213, 235, 62, 42), '>', 'rank_next')
+        self.text('Місце / ім’я', (cx - 280, 300), MUTED)
+        self.text('Час', (cx + 80, 300), MUTED)
+        self.text('Кроків', (cx + 235, 300), MUTED)
+        for rank, entry in enumerate(entries):
+            y = 337 + rank * 30
+            self.text(f'{rank + 1}.  {entry["name"]}', (cx - 280, y))
+            self.text(format_time(entry['seconds']), (cx + 80, y), GOLD)
+            self.text(str(entry['moves']), (cx + 235, y), MUTED)
+        if not entries:
+            self.text('Ще немає результатів. Пройдіть цей рівень!', (cx, 420), MUTED, center=True)
+        self.text('Стрілки — рівень · Tab — режим · T — назад', (cx, 670), MUTED, center=True)
+        self.button((32, height - 72, 150, 44), 'Назад', 'levels')
+        self.button((width - 220, height - 72, 188, 44), 'Змінити режим', 'rank_mode')
 
     def key_shape(self, center, color, diamond=False):
         x, y = center
@@ -238,7 +342,7 @@ class Application:
         width, height = self.screen.get_size()
         game, stage = self.game, self.game.stage
         self.text(f'Рівень {stage.number} / 9 · ' + ('Гра на двох' if self.mode == 'coop' else 'Один гравець'), (24, 17), GOLD, self.title_font)
-        self.text(f'Час: {int(game.elapsed)} с   Кроків: {game.moves}', (width - 285, 26), MUTED)
+        self.text(f'Час: {format_time(game.elapsed)}   Кроків: {game.moves}', (width - 330, 26), MUTED)
         for owner in range(len(game.players)):
             status = 'На виході' if game.finished[owner] else f'Ключів: {game.keys[owner]} · вихід: {"так" if game.exit_keys[owner] else "ні"}'
             control = 'стрілки' if owner == 0 and self.mode == 'coop' else 'WASD' if owner == 1 else 'WASD / стрілки'
@@ -250,6 +354,20 @@ class Application:
         for y, row in enumerate(stage.rows):
             for x, tile in enumerate(row):
                 pygame.draw.rect(self.screen, WALL if tile == '#' else PANEL, rect((x, y)), border_radius=3)
+        for pos in stage.hazards:
+            phase = game.elapsed % stage.hazard_period
+            color = RED if game.hazard_active() else GOLD if phase > stage.hazard_period - 0.45 else GREEN
+            r = rect(pos).inflate(-4, -4)
+            pygame.draw.rect(self.screen, color, r, 2)
+            pygame.draw.line(self.screen, color, r.topleft, r.bottomright, 2)
+            pygame.draw.line(self.screen, color, r.topright, r.bottomleft, 2)
+        for owner, pos in stage.switches:
+            r = rect(pos).inflate(-4, -4)
+            pygame.draw.circle(self.screen, GREEN if game.team_open else COLORS[owner], r.center, max(6, cell // 3), 3)
+        if stage.team_gate is not None and not game.team_open:
+            r = rect(stage.team_gate).inflate(-2, -2)
+            pygame.draw.rect(self.screen, GOLD, r, 3)
+            self.text('2', r.center, GOLD, center=True)
         for i, (owner, pos) in enumerate(stage.doors):
             if i not in game.opened:
                 r = rect(pos).inflate(-4, -2)
@@ -269,19 +387,25 @@ class Application:
             pygame.draw.rect(self.screen, RED, rect(pos).inflate(-6, -6), border_radius=4)
         for owner, pos in enumerate(game.players):
             if not game.finished[owner]:
-                pygame.draw.circle(self.screen, COLORS[owner], rect(pos).center, max(6, cell // 3))
-                self.text(str(owner + 1), rect(pos).center, BG, center=True)
+                center = rect(pos).center
+                if len(game.players) == 2 and game.players[0] == game.players[1]:
+                    center = (center[0] + (-cell // 6 if owner == 0 else cell // 6), center[1])
+                pygame.draw.circle(self.screen, COLORS[owner], center, max(6, cell // 3))
+                self.text(str(owner + 1), center, BG, center=True)
         self.text(game.message, (24, height - 92))
         self.text('R — спочатку · P — пауза · M — рівні · Esc — назад', (24, height - 57), MUTED)
+        self.text('Пастки: червона — небезпека · зелена — прохід · жовта — попередження', (24, height - 27), MUTED, pygame.font.Font(None, 21))
         if self.paused or game.state in (State.WON, State.LOST):
             shade = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
             shade.fill((8, 13, 25, 232))
             self.screen.blit(shade, (0, 0))
             cx, cy = width // 2, height // 2
-            heading = 'ПАУЗА' if self.paused else 'РІВЕНЬ ПРОЙДЕНО!' if game.state is State.WON else 'ВАС УПІЙМАЛИ'
+            heading = 'ПАУЗА' if self.paused else 'РІВЕНЬ ПРОЙДЕНО!' if game.state is State.WON else 'ПОРАЗКА'
             self.text(heading, (cx, cy - 110), GOLD, self.title_font, True)
+            if game.state is State.LOST:
+                self.text(game.message, (cx, cy - 158), MUTED, center=True)
             if not self.paused:
-                self.text(f'Час: {int(game.elapsed)} с · Кроків: {game.moves}', (cx, cy - 65), MUTED, center=True)
+                self.text(f'Час: {format_time(game.elapsed)} · Кроків: {game.moves}', (cx, cy - 65), MUTED, center=True)
             action = 'resume' if self.paused else 'next' if game.state is State.WON else 'retry'
             label = 'Продовжити' if self.paused else ('Наступний рівень' if self.selected < 8 else 'До вибору рівнів') if game.state is State.WON else 'Спробувати ще раз'
             self.button((cx - 200, cy - 20, 400, 56), label, action)
@@ -298,10 +422,10 @@ class Application:
 
     def run(self, smoke_test=False, screenshot=None):
         if smoke_test:
-            self.load_level(self.selected)
+            self.load_level(self.selected, preview=True)
         frames = 0
         while self.game.state is not State.EXIT:
-            dt = min(self.clock.tick(60) / 1000.0, 0.25)
+            dt = self.clock.tick(60) / 1000.0
             for event in pygame.event.get():
                 self.handle_event(event)
             self.update(dt)

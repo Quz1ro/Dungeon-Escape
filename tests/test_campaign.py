@@ -6,6 +6,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from dungeon_escape.campaign import SOLO_STAGES, COOP_STAGES, Session, Stage
 from dungeon_escape.model import State
+from playthrough import play_stage
 
 ROOM = Stage(1, ('#########', '#.......#', '#.......#', '#.......#', '#########'),
              ((1, 1), (1, 3)), ((7, 1), (7, 3)),
@@ -26,8 +27,7 @@ class CampaignTests(unittest.TestCase):
             for stage in stages:
                 with self.subTest(players=len(stage.starts), level=stage.number):
                     game = Session(stage)
-                    for owner, path in enumerate(stage.solutions):
-                        finish_player(game, owner, path)
+                    play_stage(game)
                     self.assertEqual(game.state, State.WON)
                     self.assertTrue(all(game.exit_keys))
                     self.assertEqual(len(game.opened), len(stage.doors))
@@ -132,6 +132,70 @@ class CampaignTests(unittest.TestCase):
         for direction in ((0, -1), (-1, 0), (1, 1), (2, 0)):
             game.move(0, direction)
         self.assertEqual(game.players[0], ROOM.starts[0])
+
+    def test_running_straight_without_waiting_loses_on_every_solo_level(self):
+        for stage in SOLO_STAGES:
+            with self.subTest(level=stage.number):
+                game = Session(stage)
+                finish_player(game, 0, stage.solutions[0])
+                self.assertEqual(game.state, State.LOST)
+
+    def test_trap_kills_on_entry_and_when_switching_on_under_player(self):
+        stage = SOLO_STAGES[0]
+        trap = stage.hazards[0]
+        game = Session(stage)
+        game.players[0] = trap
+        self.assertTrue(game.collision())
+        self.assertEqual(game.state, State.LOST)
+        game.reset()
+        game.elapsed = stage.hazard_period * 0.75
+        game.players[0] = trap
+        self.assertFalse(game.collision())
+        game.update(stage.hazard_period)
+        self.assertEqual(game.state, State.LOST)
+
+    def test_shared_map_requires_both_switches_and_alternating_door_owners(self):
+        for stage in COOP_STAGES:
+            game = Session(stage)
+            self.assertEqual(len(stage.rows[0]), 13)
+            self.assertEqual({owner for owner, _ in stage.doors}, {0, 1})
+            first_owner, first_pos = stage.switches[0]
+            game.players[first_owner] = first_pos
+            game.check_switches()
+            self.assertFalse(game.team_open)
+            for owner, pos in stage.switches:
+                game.players[owner] = pos
+            game.check_switches()
+            self.assertTrue(game.team_open)
+            game.reset()
+            self.assertFalse(game.team_open)
+
+    def test_team_gate_blocks_both_until_switches_are_pressed(self):
+        stage = COOP_STAGES[0]
+        gate = stage.team_gate
+        before = stage.solutions[0][6]
+        for owner in (0, 1):
+            game = Session(stage)
+            game.players[owner] = before
+            game.move(owner, (gate[0] - before[0], gate[1] - before[1]))
+            self.assertEqual(game.players[owner], before)
+
+    def test_neither_player_can_bypass_partners_locked_doors(self):
+        from collections import deque
+        from dungeon_escape.model import DIRECTIONS
+        for stage in COOP_STAGES:
+            for owner in (0, 1):
+                blocked = {pos for door_owner, pos in stage.doors if door_owner != owner}
+                seen = {stage.starts[owner]}
+                queue = deque(seen)
+                while queue:
+                    x, y = queue.popleft()
+                    for dx, dy in DIRECTIONS:
+                        point = x + dx, y + dy
+                        if point not in seen and point not in blocked and stage.rows[point[1]][point[0]] == '.':
+                            seen.add(point)
+                            queue.append(point)
+                self.assertNotIn(stage.exits[owner], seen)
 
     def test_invalid_time_is_rejected(self):
         game = Session(ROOM)

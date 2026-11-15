@@ -14,6 +14,7 @@ import pygame
 from dungeon_escape.app import Application
 from dungeon_escape.model import State
 from test_campaign import ROOM, finish_player
+from playthrough import play_stage
 from dungeon_escape.campaign import Session
 
 
@@ -45,8 +46,11 @@ class PygameTests(unittest.TestCase):
         self.assertEqual(len({r.centerx for r in numbers}), 3)
         self.assertEqual(len({r.centery for r in numbers}), 3)
         self.click(8)
+        self.assertEqual(self.app.page, 'levels')
+        self.assertTrue(self.app.notice)
+        self.click(0)
         self.assertEqual(len(self.app.game.players), 2)
-        self.assertEqual(self.app.game.stage.number, 9)
+        self.assertEqual(self.app.game.stage.number, 1)
 
     def test_keyboard_navigation_and_back(self):
         press(self.app, pygame.K_RETURN)
@@ -54,6 +58,9 @@ class PygameTests(unittest.TestCase):
         press(self.app, pygame.K_DOWN)
         press(self.app, pygame.K_RIGHT)
         self.assertEqual(self.app.selected, 4)
+        press(self.app, pygame.K_RETURN)
+        self.assertEqual(self.app.page, 'levels')
+        self.app.selected = 0
         press(self.app, pygame.K_RETURN)
         self.assertEqual(self.app.page, 'play')
         press(self.app, pygame.K_ESCAPE)
@@ -89,7 +96,7 @@ class PygameTests(unittest.TestCase):
 
     def test_progress_is_separate_persistent_and_handles_bad_file(self):
         self.app.load_level(0)
-        finish_player(self.app.game, 0, self.app.game.stage.solutions[0])
+        play_stage(self.app.game)
         self.app.record_win()
         self.app.record_win()
         other = Application(progress_path=self.path)
@@ -104,6 +111,7 @@ class PygameTests(unittest.TestCase):
         press(self.app, pygame.K_RETURN)
         self.assertEqual(self.app.selected, 1)
         self.assertFalse(any(self.app.game.exit_keys))
+        self.app.completed[self.app.mode] = list(range(1, 9))
         self.app.load_level(8)
         self.app.game.state = State.WON
         press(self.app, pygame.K_RETURN)
@@ -116,13 +124,77 @@ class PygameTests(unittest.TestCase):
         for mode in ('solo', 'coop'):
             self.app.mode = mode
             for index in range(9):
-                self.app.load_level(index)
+                self.app.load_level(index, preview=True)
                 self.app.draw()
             for state in (State.LOST, State.WON):
                 self.app.game.state = state
                 self.app.draw()
             self.app.levels()
             self.app.draw()
+
+    def test_sequential_unlock_is_enforced_in_both_modes(self):
+        for mode in ('solo', 'coop'):
+            self.app.levels(mode)
+            self.assertFalse(self.app.load_level(1))
+            self.assertEqual(self.app.page, 'levels')
+            self.app.completed[mode] = [9]
+            self.assertFalse(self.app.is_unlocked(1))
+            self.app.completed[mode] = [1, 3]
+            self.assertTrue(self.app.is_unlocked(1))
+            self.assertFalse(self.app.is_unlocked(3))
+            self.assertTrue(self.app.load_level(1))
+
+    def test_top_saves_replays_once_per_run_and_sorts(self):
+        for seconds, moves in ((20.5, 30), (10.25, 40), (10.25, 20)):
+            self.app.load_level(0)
+            self.app.game.state = State.WON
+            self.app.game.elapsed = seconds
+            self.app.game.moves = moves
+            self.app.record_win()
+            self.app.record_win()
+        entries = self.app.scores['solo']['1']
+        self.assertEqual([(e['seconds'], e['moves']) for e in entries], [(10.25, 20), (10.25, 40), (20.5, 30)])
+        other = Application(progress_path=self.path)
+        self.assertEqual(other.scores['solo']['1'], entries)
+        self.assertEqual(other.scores['coop'], {})
+        self.app.levels()
+        self.click('top')
+        self.app.draw()
+        self.click('rank_next')
+        self.assertEqual(self.app.selected, 1)
+        self.click('rank_mode')
+        self.assertEqual(self.app.mode, 'coop')
+        self.app.draw()
+
+    def test_old_progress_is_preserved_but_new_campaign_starts_locked(self):
+        self.path.write_text('{"solo": [1, 2, 9], "coop": [1], "profile": "Тест"}', encoding='utf-8')
+        other = Application(progress_path=self.path)
+        self.assertFalse(other.is_unlocked(1))
+        self.assertEqual(other.profile, 'Тест')
+        other.save_progress()
+        import json
+        saved = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['legacy_progress']['solo'], [1, 2, 9])
+        self.assertEqual(saved['campaign_version'], 2)
+
+    def test_edit_name_and_cancel(self):
+        self.click('name')
+        self.app.handle_event(pygame.event.Event(pygame.TEXTINPUT, text='Олег'))
+        press(self.app, pygame.K_RETURN)
+        self.assertEqual(self.app.profile, 'Олег')
+        self.click('name')
+        self.app.handle_event(pygame.event.Event(pygame.TEXTINPUT, text='Нове'))
+        press(self.app, pygame.K_ESCAPE)
+        self.assertEqual(self.app.profile, 'Олег')
+
+    def test_leaving_name_input_with_mouse_restores_normal_controls(self):
+        self.click('name')
+        self.app.handle_event(pygame.event.Event(pygame.TEXTINPUT, text='Команда'))
+        self.click('coop')
+        self.assertFalse(self.app.editing_name)
+        self.assertEqual(self.app.profile, 'Команда')
+        press(self.app, pygame.K_RETURN)
+        self.assertEqual(self.app.page, 'play')
 
     def test_resize_and_ukrainian_font(self):
         self.app.handle_event(pygame.event.Event(pygame.VIDEORESIZE, w=100, h=100))
