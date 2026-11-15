@@ -13,6 +13,7 @@ import pygame
 
 from dungeon_escape.app import Application
 from dungeon_escape.model import State
+from dungeon_escape.levels import LEVELS
 from test_model import winning_actions
 
 
@@ -43,7 +44,7 @@ class PygameTests(unittest.TestCase):
 
     def test_all_levels_can_win_through_input_and_draw_terminal_screens(self):
         keys = {(0, -1): pygame.K_UP, (0, 1): pygame.K_DOWN, (-1, 0): pygame.K_LEFT, (1, 0): pygame.K_RIGHT}
-        for number in ("01", "02", "03"):
+        for number in LEVELS:
             with self.subTest(prototype=number):
                 app = Application(number)
                 app.draw()
@@ -66,6 +67,45 @@ class PygameTests(unittest.TestCase):
                     self.assertEqual(app.game.state, State.PLAYING)
                 app.handle_event(pygame.event.Event(pygame.QUIT))
                 self.assertEqual(app.game.state, State.EXIT)
+
+    def test_menu_selection_and_return(self):
+        app = Application("01")
+        press(app, pygame.K_UP)
+        self.assertEqual(app.selected, len(LEVELS) - 1)
+        press(app, pygame.K_DOWN)
+        self.assertEqual(app.selected, 0)
+        press(app, pygame.K_DOWN)
+        press(app, pygame.K_RETURN)
+        self.assertIs(app.game.level, LEVELS["02"])
+        self.assertEqual(app.game.state, State.PLAYING)
+        press(app, pygame.K_m)
+        self.assertEqual(app.game.state, State.MENU)
+        before = app.game.enemy
+        app.game.update(10)
+        self.assertEqual(app.game.enemy, before)
+        app.draw()
+
+    def test_mouse_starts_selected_level(self):
+        app = Application("01")
+        app.handle_event(pygame.event.Event(
+            pygame.MOUSEBUTTONDOWN, button=1, pos=app.level_buttons()[4].center))
+        self.assertIs(app.game.level, LEVELS["05"])
+        self.assertEqual(app.game.state, State.PLAYING)
+        self.assertFalse(app.game.has_key)
+        app.draw()
+
+    def test_next_level_and_end_of_last_level(self):
+        app = Application("03")
+        app.game.reset(State.WON)
+        press(app, pygame.K_RETURN)
+        self.assertIs(app.game.level, LEVELS["04"])
+        self.assertEqual(app.game.state, State.PLAYING)
+        self.assertFalse(app.game.has_key)
+        app.load_level(len(LEVELS) - 1)
+        app.game.reset(State.WON)
+        press(app, pygame.K_RETURN)
+        self.assertEqual(app.game.state, State.MENU)
+        self.assertEqual(app.selected, 0)
 
     def test_ukrainian_alphabet_has_glyphs(self):
         app = Application("03")

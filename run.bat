@@ -48,7 +48,7 @@ if errorlevel 1 (
 )
 
 echo Запуск Dungeon Escape...
-".venv\Scripts\python.exe" "prototypes\03_dungeon_escape.py"
+".venv\Scripts\python.exe" "prototypes\03_dungeon_escape.py" --prototype 01
 if errorlevel 1 goto error
 popd
 exit /b 0
